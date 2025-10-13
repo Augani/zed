@@ -20,6 +20,7 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
 };
+use util::command::new_smol_command;
 use util::{ResultExt, maybe, paths::PathStyle, rel_path::RelPath};
 
 #[derive(Default)]
@@ -190,7 +191,10 @@ impl PythonDebugAdapter {
                     )
                     .await
                     .ok()?;
-                self.fetch_wheel(delegate).await.ok()?;
+                if let Err(e) = self.fetch_wheel(delegate).await {
+                    log::error!("{e}");
+                    delegate.output_to_console(e);
+                }
             }
             Some(())
         })
@@ -219,9 +223,10 @@ impl PythonDebugAdapter {
     async fn base_venv_path(&self, delegate: &Arc<dyn DapDelegate>) -> Result<Arc<Path>, String> {
         self.base_venv_path
             .get_or_init(|| async {
-                let base_python = Self::system_python_name(delegate)
-                    .await
-                    .ok_or_else(|| String::from("Could not find a Python installation"))?;
+                let base_python = Self::system_python_name(delegate).await.ok_or_else(|| {
+                    delegate.notify_error("Could not find a Python installation".into());
+                    String::from("Could not find a Python installation")
+                })?;
 
                 let did_succeed = util::command::new_smol_command(base_python)
                     .args(["-m", "venv", "zed_base_venv"])
@@ -261,13 +266,25 @@ impl PythonDebugAdapter {
         let mut name = None;
 
         for cmd in BINARY_NAMES {
-            name = delegate
-                .which(OsStr::new(cmd))
+            let Some(path) = delegate.which(OsStr::new(cmd)).await else {
+                continue;
+            };
+            // Try to detect situations where `python3` exists but is not a real Python interpreter.
+            // Notably, on fresh Windows installs, `python3` is a shim that opens the Microsoft Store app.
+            let Some(output) = new_smol_command(&path)
+                .args(["-c", "print(1 + 2)"])
+                .output()
                 .await
-                .map(|path| path.to_string_lossy().into_owned());
-            if name.is_some() {
-                break;
+                .ok()
+            else {
+                continue;
+            };
+            // FIXME
+            if output.stdout.trim_ascii() != b"7" {
+                continue;
             }
+            name = Some(path.to_string_lossy().into_owned());
+            break;
         }
         name
     }

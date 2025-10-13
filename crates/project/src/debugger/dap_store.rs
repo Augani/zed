@@ -79,6 +79,7 @@ pub struct LocalDapStore {
     environment: Entity<ProjectEnvironment>,
     toolchain_store: Arc<dyn LanguageToolchainStore>,
     is_headless: bool,
+    notification_tx: mpsc::UnboundedSender<String>,
 }
 
 pub struct RemoteDapStore {
@@ -140,6 +141,18 @@ impl DapStore {
         is_headless: bool,
         cx: &mut Context<Self>,
     ) -> Self {
+        let (notification_tx, mut notification_rx) = mpsc::unbounded();
+
+        cx.spawn(async move |this, cx| {
+            while let Some(message) = notification_rx.next().await {
+                this.update(cx, |_, cx| {
+                    cx.emit(DapStoreEvent::Notification(message));
+                })?;
+            }
+            anyhow::Ok(())
+        })
+        .detach();
+
         let mode = DapStoreMode::Local(LocalDapStore {
             fs: fs.clone(),
             environment,
@@ -147,6 +160,7 @@ impl DapStore {
             node_runtime,
             toolchain_store,
             is_headless,
+            notification_tx,
         });
 
         Self::new(mode, breakpoint_store, worktree_store, fs, cx)
@@ -603,6 +617,7 @@ impl DapStore {
                 env.get_worktree_environment(worktree.clone(), cx)
             }),
             local_store.is_headless,
+            local_store.notification_tx.clone(),
         ))
     }
 
@@ -936,6 +951,7 @@ pub struct DapAdapterDelegate {
     toolchain_store: Arc<dyn LanguageToolchainStore>,
     load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
     is_headless: bool,
+    notifications: mpsc::UnboundedSender<String>,
 }
 
 impl DapAdapterDelegate {
@@ -948,6 +964,7 @@ impl DapAdapterDelegate {
         toolchain_store: Arc<dyn LanguageToolchainStore>,
         load_shell_env_task: Shared<Task<Option<HashMap<String, String>>>>,
         is_headless: bool,
+        notifications: mpsc::UnboundedSender<String>,
     ) -> Self {
         Self {
             fs,
@@ -958,6 +975,7 @@ impl DapAdapterDelegate {
             toolchain_store,
             load_shell_env_task,
             is_headless,
+            notifications,
         }
     }
 }
@@ -1024,5 +1042,9 @@ impl dap::adapters::DapDelegate for DapAdapterDelegate {
 
     fn is_headless(&self) -> bool {
         self.is_headless
+    }
+
+    fn notify_error(&self, error: String) {
+        self.notifications.unbounded_send(error).ok();
     }
 }
